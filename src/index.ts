@@ -81,7 +81,7 @@ export default function piRulesExtension(pi: ExtensionAPI): void {
 
 		const loaded = engine.loadStaticRules(ctx.cwd);
 		const nativeContextPaths = new Set(
-			event.systemPromptOptions.contextFiles?.flatMap((contextFile) => pathKeys(contextFile.path)) ?? [],
+			event.systemPromptOptions?.contextFiles?.flatMap((contextFile) => pathKeys(contextFile.path)) ?? [],
 		);
 		for (const rule of loaded.rules) {
 			if (nativeContextPaths.has(rule.path) || nativeContextPaths.has(rule.realPath)) {

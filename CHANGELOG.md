@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented `PI_RULES_DISABLED`, `PI_RULES_MAX_RULE_CHARS`, and `PI_RULES_MAX_RESULT_CHARS` environment variables are now read at extension registration; previously nothing in `src/` consulted `process.env`, so setting them had no effect.
 - Dynamic rule injection now dedupes by rule across the session instead of per tool call, preventing repeated nested `AGENTS.md`/`CLAUDE.md` instruction blocks on subsequent reads.
 - Dynamic injection now skips rules already injected statically or already loaded by pi's native context loader.
+- `before_agent_start` now supports OMP releases that do not expose `systemPromptOptions`, while retaining native context-file deduplication when the field is available.
 - Dynamic rule loading now preserves each target file's project root so nested projects load their nearest rules correctly.
 
 ## [0.1.0] - 2026-04-29

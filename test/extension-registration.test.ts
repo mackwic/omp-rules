@@ -148,6 +148,24 @@ describe("piRulesExtension", () => {
 		expect(result).toBeUndefined();
 	});
 
+	it("#given a legacy OMP event without systemPromptOptions #when before_agent_start emitted #then static rules are injected", async () => {
+		// given
+		const project = createProject();
+		project.write("AGENTS.md", "Use project rules.");
+		const fakePi = registerExtension();
+		const cwd = projectCwd(project);
+		const event = {
+			...beforeAgentStartEvent(cwd),
+			systemPromptOptions: undefined,
+		} as unknown as BeforeAgentStartEvent;
+
+		// when
+		const result = await fakePi.emit("before_agent_start", event, fakePi.makeCtx({ cwd }));
+
+		// then
+		expect(result).toEqual({ systemPrompt: expect.stringContaining("Use project rules.") });
+	});
+
 	it("#given disabled true #when tool_result emitted #then handler returns undefined", async () => {
 		// given
 		const project = createProject();

@@ -1,19 +1,21 @@
 {
-	"name": "@code-yeongyu/pi-rules",
+	"name": "@mackwic/omp-rules",
 	"version": "0.1.1",
-	"description": "Rule context loader extension for the pi coding agent. Discovers rule files from .omo/rules/, .claude/rules/, .cursor/rules/, .github/instructions/, AGENTS.md, CLAUDE.md and injects them into the agent context. Inspired by oh-my-openagent (omo).",
+	"description": "Rule context loader extension for Oh My Pi (OMP). Discovers rule files from .omo/rules/, .claude/rules/, .cursor/rules/, .github/instructions/, AGENTS.md, CLAUDE.md and injects them into the agent context.",
 	"type": "module",
 	"license": "MIT",
-	"homepage": "https://github.com/code-yeongyu/pi-rules",
+	"homepage": "https://github.com/mackwic/omp-rules",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/code-yeongyu/pi-rules.git"
+		"url": "git+https://github.com/mackwic/omp-rules.git"
 	},
 	"bugs": {
-		"url": "https://github.com/code-yeongyu/pi-rules/issues"
+		"url": "https://github.com/mackwic/omp-rules/issues"
 	},
 	"author": "Yeongyu Kim <yeongyu@sionic.ai>",
 	"keywords": [
+		"omp",
+		"oh-my-pi",
 		"pi",
 		"pi-mono",
 		"pi-coding-agent",
@@ -22,9 +24,7 @@
 		"agent-rules",
 		"context-injection",
 		"agents-md",
-		"claude-md",
-		"oh-my-openagent",
-		"omo"
+		"claude-md"
 	],
 	"pi": {
 		"extensions": [

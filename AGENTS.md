@@ -36,7 +36,7 @@ Project rules for `pi-rules` itself.
 
 ## Hook contract reminders
 
-- `before_agent_start`: return `{ systemPrompt: event.systemPrompt + block }`. NEVER mutate `event.systemPrompt` in place. Use `event.systemPromptOptions.contextFiles` to dedup against pi's native loader.
+- `before_agent_start`: return `{ systemPrompt: event.systemPrompt + block }`. NEVER mutate `event.systemPrompt` in place. Use `event.systemPromptOptions?.contextFiles` when available to dedup against pi's native loader; OMP releases that omit the field must remain supported.
 - `tool_result`: return `{ content: [...event.content, { type: "text", text: block }] }`. NEVER mutate `event.content` in place.
 - `session_start`: reset state, but never throw.
 - All hooks are idempotent: dedup via cache keys (cwd+realPath+hash for static, toolCallId+realPath+hash for dynamic).
