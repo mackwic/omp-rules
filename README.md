@@ -18,7 +18,7 @@ omp-rules is an OMP-focused fork of [pi-rules](https://github.com/code-yeongyu/p
 Install the OMP fork from GitHub:
 
 ```bash
-omp install git:github.com:mackwic/omp-rules
+omp install git:github.com/mackwic/omp-rules
 ```
 
 For local development or a one-shot test:
