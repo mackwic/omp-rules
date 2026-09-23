@@ -1,13 +1,13 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import type { Engine } from "./rules/engine.js";
-import type { LoadedRule, MatchReason, RuleDiagnostic } from "./rules/types.js";
+import type { RuleDiagnostic, RuleDiscoveryReport, RuleInspection, RuleScope } from "./rules/types.js";
 
 const RULE_SUBCOMMANDS = ["list", "show", "paths", "status"] as const;
 
 export function registerSlashCommands(pi: ExtensionAPI, engine: Engine): void {
 	pi.registerCommand("rules", {
-		description: "Inspect loaded pi-rules.",
+		description: "Inspect discovered pi-rules.",
 		getArgumentCompletions: (prefix) => {
 			const completions = RULE_SUBCOMMANDS.filter((subcommand) => subcommand.startsWith(prefix)).map(
 				(subcommand) => ({
@@ -20,15 +20,15 @@ export function registerSlashCommands(pi: ExtensionAPI, engine: Engine): void {
 		handler: async (args, ctx) => {
 			const tokens = args.trim().length === 0 ? [] : args.trim().split(/\s+/);
 			const subcommand = tokens[0] ?? "";
-			const loaded = engine.loadStaticRules(ctx.cwd);
+			const report = engine.inspectRules(ctx.cwd);
 
 			if (subcommand === "" || subcommand === "status") {
-				notify(ctx, buildSummaryText(loaded.rules, loaded.diagnostics));
+				notify(ctx, reportText("pi-rules", report));
 				return;
 			}
 
 			if (subcommand === "list") {
-				notify(ctx, formatRuleList(loaded.rules));
+				notify(ctx, formatRuleList(report.rules));
 				return;
 			}
 
@@ -39,9 +39,14 @@ export function registerSlashCommands(pi: ExtensionAPI, engine: Engine): void {
 					return;
 				}
 
-				const rule = findRuleById(loaded.rules, id);
+				const rule = findRuleById(report.rules, id);
 				if (rule === null) {
 					notify(ctx, `Rule not found: ${id}`, "error");
+					return;
+				}
+
+				if (rule.scope === null) {
+					notify(ctx, `Rule not readable: ${rule.relativePath} (${rule.diagnostics.join("; ")})`, "error");
 					return;
 				}
 
@@ -50,7 +55,7 @@ export function registerSlashCommands(pi: ExtensionAPI, engine: Engine): void {
 			}
 
 			if (subcommand === "paths") {
-				notify(ctx, loaded.rules.map((rule) => rule.path).join("\n"));
+				notify(ctx, report.rules.map((rule) => rule.path).join("\n"));
 				return;
 			}
 
@@ -62,8 +67,8 @@ export function registerSlashCommands(pi: ExtensionAPI, engine: Engine): void {
 		description: "Reload pi-rules for the current session.",
 		handler: async (_args, ctx) => {
 			engine.resetSession(ctx.cwd);
-			const loaded = engine.loadStaticRules(ctx.cwd);
-			notify(ctx, buildReloadText(loaded.rules, loaded.diagnostics));
+			engine.loadStaticRules(ctx.cwd);
+			notify(ctx, reportText("Reloaded", engine.inspectRules(ctx.cwd)));
 		},
 	});
 }
@@ -72,40 +77,69 @@ function notify(ctx: ExtensionCommandContext, message: string, severity: "info" 
 	ctx.ui.notify(message, severity);
 }
 
-function buildSummaryText(rules: ReadonlyArray<LoadedRule>, diagnostics: ReadonlyArray<RuleDiagnostic>): string {
-	return appendDiagnostics(`pi-rules: ${rules.length} rules from ${countSources(rules)} sources`, diagnostics);
-}
-
-function buildReloadText(rules: ReadonlyArray<LoadedRule>, diagnostics: ReadonlyArray<RuleDiagnostic>): string {
-	return appendDiagnostics(`Reloaded ${rules.length} rules from ${countSources(rules)} sources`, diagnostics);
+/**
+ * Summarize a discovery report.
+ *
+ * Counts cover every discovered rule, not just the ones injected: a rule scoped
+ * to globs is loaded on demand, and reporting only the static set is what made
+ * `.claude/rules/*.md` look missing.
+ */
+function reportText(prefix: string, report: RuleDiscoveryReport): string {
+	const applied = report.rules.filter((rule) => rule.appliesStatically).length;
+	const scoped = report.rules.filter((rule) => rule.scope?.kind === "globs").length;
+	const text = `${prefix}: ${report.rules.length} rules from ${countSources(report.rules)} sources (${applied} always applied, ${scoped} file-scoped)`;
+	return appendDiagnostics(text, report.diagnostics);
 }
 
 function appendDiagnostics(text: string, diagnostics: ReadonlyArray<RuleDiagnostic>): string {
 	return diagnostics.length === 0 ? text : `${text}, ${diagnostics.length} diagnostics`;
 }
 
-function countSources(rules: ReadonlyArray<LoadedRule>): number {
+function countSources(rules: ReadonlyArray<RuleInspection>): number {
 	return new Set(rules.map((rule) => rule.source)).size;
 }
 
-function formatRuleList(rules: ReadonlyArray<LoadedRule>): string {
-	return rules
-		.map((rule) => `${rule.relativePath} [${rule.source}, ${formatMatchReason(rule.matchReason)}]`)
-		.join("\n");
+function formatRuleList(rules: ReadonlyArray<RuleInspection>): string {
+	return rules.map(formatRuleLine).join("\n");
 }
 
-function formatMatchReason(matchReason: MatchReason): string {
-	if (typeof matchReason === "string") {
-		return matchReason;
+function formatRuleLine(rule: RuleInspection): string {
+	const markers = [describeScope(rule.scope)];
+	if (rule.shadowedBy !== undefined) {
+		markers.push(`shadowed by ${rule.shadowedBy}`);
 	}
-	if (matchReason.kind === "no-match") {
-		return matchReason.kind;
+	if (rule.injectedStatically) {
+		markers.push("in system prompt");
+	}
+	if (rule.diagnostics.length > 0) {
+		markers.push(`${rule.diagnostics.length} diagnostics`);
 	}
 
-	return `${matchReason.kind}:${matchReason.pattern}`;
+	return `${rule.relativePath} [${rule.source}, ${markers.join(", ")}]`;
 }
 
-function findRuleById(rules: ReadonlyArray<LoadedRule>, id: string): LoadedRule | null {
+function describeScope(scope: RuleScope | null): string {
+	if (scope === null) {
+		return "unreadable";
+	}
+
+	switch (scope.kind) {
+		case "single-file":
+			return "single-file";
+		case "always-apply":
+			return "alwaysApply";
+		case "always-apply-default":
+			return "alwaysApply (default: no scope)";
+		case "globs":
+			return `globs: ${scope.patterns.join(", ")}`;
+		case "inactive":
+			return "inactive (alwaysApply: false)";
+		case "malformed-frontmatter":
+			return "malformed frontmatter (not loaded)";
+	}
+}
+
+function findRuleById(rules: ReadonlyArray<RuleInspection>, id: string): RuleInspection | null {
 	const exactMatch = rules.find((rule) => rule.relativePath === id);
 	if (exactMatch !== undefined) {
 		return exactMatch;

@@ -10,7 +10,9 @@ import {
 	isStaticInjected as isStaticInjectedInState,
 	markDynamicInjected as markDynamicInjectedInState,
 	markStaticInjected as markStaticInjectedInState,
+	staticDedupKey,
 } from "./cache.js";
+import { canonicalPath } from "./canonical-path.js";
 import {
 	DEFAULT_MAX_RESULT_CHARS,
 	DEFAULT_MAX_RULE_CHARS,
@@ -19,10 +21,19 @@ import {
 } from "./constants.js";
 import { createRuleDiscoveryCache, type RuleDiscoveryCache } from "./finder.js";
 import { formatDynamicBlock, formatStaticBlock } from "./formatter.js";
-import { hashContent, matchRule } from "./matcher.js";
+import { deriveRuleScope, hashContent, matchRule } from "./matcher.js";
 import { sortCandidates } from "./ordering.js";
 import { parseRule } from "./parser.js";
-import type { LoadedRule, MatchReason, PiRulesConfig, RuleCandidate, RuleDiagnostic, SessionState } from "./types.js";
+import type {
+	LoadedRule,
+	MatchReason,
+	PiRulesConfig,
+	RuleCandidate,
+	RuleDiagnostic,
+	RuleDiscoveryReport,
+	RuleInspection,
+	SessionState,
+} from "./types.js";
 
 interface LoadedRuleContent {
 	frontmatter: LoadedRule["frontmatter"];
@@ -78,6 +89,14 @@ export interface Engine {
 		cwd: string,
 		targetPaths: ReadonlyArray<string>,
 	): { rules: LoadedRule[]; diagnostics: RuleDiagnostic[] };
+	/**
+	 * Report every discovered rule with its derived scope and load status.
+	 *
+	 * Unlike `loadStaticRules`/`loadDynamicRules` this is an observability surface:
+	 * it never filters candidates by applicability and never mutates injection
+	 * state, so glob-scoped rules stay visible in `/rules list`.
+	 */
+	inspectRules(cwd: string, targetFile?: string | null): RuleDiscoveryReport;
 	formatStatic(rules: ReadonlyArray<LoadedRule>): string;
 	formatDynamic(rules: ReadonlyArray<LoadedRule>, target: string): string;
 	resetSession(cwd?: string): void;
@@ -148,7 +167,7 @@ export function createEngine(config: PiRulesConfig, deps: EngineDeps): Engine {
 			return emptyLoadResult(state);
 		}
 
-		const targetFiles = uniqueStrings(targetPaths);
+		const targetFiles = uniqueStrings(targetPaths).map(canonicalPath);
 		const shouldCacheLookups = targetFiles.length > 1;
 		const rules: LoadedRule[] = [];
 		const diagnostics: RuleDiagnostic[] = [];
@@ -235,22 +254,29 @@ export function createEngine(config: PiRulesConfig, deps: EngineDeps): Engine {
 		const fingerprints: DynamicTargetFingerprint[] = [];
 
 		for (const targetFile of uniqueStrings(targetPaths)) {
+			const canonicalTarget = canonicalPath(targetFile);
 			const projectRoot =
-				cwdProjectRoot !== null && isSameOrChildPath(targetFile, cwdProjectRoot)
+				cwdProjectRoot !== null && isSameOrChildPath(canonicalTarget, cwdProjectRoot)
 					? cwdProjectRoot
-					: deps.findProjectRoot(targetFile);
+					: deps.findProjectRoot(canonicalTarget);
 			const findOptions: Parameters<EngineDeps["findCandidates"]>[0] = {
 				projectRoot,
-				targetFile,
+				targetFile: canonicalTarget,
 				cache: discoveryCache,
 				...(disabledSources === undefined ? {} : { disabledSources }),
 			};
 			const candidates = sortCandidates(deps.findCandidates(findOptions));
-			const cacheKey = dynamicTargetCacheKey(targetFile);
 			fingerprints.push({
+				// Keep the caller's spelling for display; key and fingerprint stay canonical.
 				targetPath: targetFile,
-				cacheKey,
-				fingerprint: computeDynamicTargetFingerprint(targetFile, projectRoot, candidates, config, fingerprintFn),
+				cacheKey: dynamicTargetCacheKey(canonicalTarget),
+				fingerprint: computeDynamicTargetFingerprint(
+					canonicalTarget,
+					projectRoot,
+					candidates,
+					config,
+					fingerprintFn,
+				),
 			});
 		}
 
@@ -267,11 +293,68 @@ export function createEngine(config: PiRulesConfig, deps: EngineDeps): Engine {
 		return state.dynamicTargetFingerprints.get(target.cacheKey) === target.fingerprint;
 	}
 
+	function inspectRules(cwd: string, targetFile: string | null = null): RuleDiscoveryReport {
+		const projectRoot = deps.findProjectRoot(targetFile ?? cwd);
+		const disabledSources = disabledSourcesFor(config);
+		const candidates = sortCandidates(
+			deps.findCandidates({
+				projectRoot,
+				targetFile: targetFile === null ? null : canonicalPath(targetFile),
+				...(disabledSources === undefined ? {} : { disabledSources }),
+			}),
+		);
+		const matchRuleImpl = deps.matchRule ?? matchRule;
+		const diagnostics: RuleDiagnostic[] = [];
+		const rules: RuleInspection[] = [];
+		let rootSingleFile: RuleCandidate | null = null;
+
+		for (const candidate of candidates) {
+			const shadowedBy =
+				rootSingleFile === null || !isRootSingleFile(candidate) ? undefined : rootSingleFile.relativePath;
+			if (rootSingleFile === null && isRootSingleFile(candidate)) {
+				rootSingleFile = candidate;
+			}
+
+			const diagnosticStart = diagnostics.length;
+			const loadedRule = loadCandidate(candidate, deps, diagnostics, projectRoot, {});
+			const scope =
+				loadedRule === null
+					? null
+					: deriveRuleScope(loadedRule.frontmatter, candidate.isSingleFile, loadedRule.frontmatterMalformed);
+			const appliesStatically =
+				loadedRule !== null &&
+				matchRuleImpl({
+					frontmatter: loadedRule.frontmatter,
+					isSingleFile: candidate.isSingleFile,
+					frontmatterMalformed: loadedRule.frontmatterMalformed,
+					pathBases: null,
+				}).matched;
+
+			rules.push({
+				path: candidate.path,
+				realPath: candidate.realPath,
+				relativePath: candidate.relativePath,
+				source: candidate.source,
+				scope,
+				appliesStatically,
+				injectedStatically:
+					loadedRule !== null &&
+					state.staticDedup.has(staticDedupKey(cwd, candidate.realPath, loadedRule.contentHash)),
+				...(shadowedBy === undefined ? {} : { shadowedBy }),
+				body: loadedRule?.body ?? "",
+				diagnostics: diagnostics.slice(diagnosticStart).map((diagnostic) => diagnostic.message),
+			});
+		}
+
+		return { rules, diagnostics };
+	}
+
 	return {
 		state,
 		config,
 		loadStaticRules,
 		loadDynamicRules,
+		inspectRules,
 		formatStatic: (rules) =>
 			formatStaticBlock(rules, { maxRuleChars: config.maxRuleChars, maxResultChars: config.maxResultChars }),
 		formatDynamic: (rules, target) =>
@@ -320,6 +403,7 @@ function matchDynamicRuleCached(
 	const matchResult = matchRuleImpl({
 		frontmatter: loadedRule.frontmatter,
 		isSingleFile: candidate.isSingleFile,
+		frontmatterMalformed: loadedRule.frontmatterMalformed,
 		pathBases: pathBasesForTarget(projectRoot, targetFile, candidate),
 	});
 	const reason = matchResult.matched ? matchResult.reason : null;
@@ -364,6 +448,7 @@ function loadStaticCandidates(
 ) {
 	const rules: LoadedRule[] = [];
 	const diagnostics: RuleDiagnostic[] = [];
+	const matchRuleImpl = deps.matchRule ?? matchRule;
 	let rootSingleFileSelected = false;
 
 	for (const candidate of sortCandidates(candidates)) {
@@ -376,7 +461,7 @@ function loadStaticCandidates(
 			continue;
 		}
 
-		const matchReason = staticMatchReason(loadedRule);
+		const matchReason = staticMatchReason(loadedRule, matchRuleImpl);
 		if (matchReason === null) {
 			continue;
 		}
@@ -449,6 +534,7 @@ function loadedRuleFromContent(
 		frontmatter: content.frontmatter,
 		body: content.body,
 		contentHash: content.contentHash,
+		frontmatterMalformed: content.diagnostic !== undefined,
 		matchReason: { kind: "no-match" },
 	};
 }
@@ -551,16 +637,14 @@ function findProjectRootCached(
 	return projectRoot;
 }
 
-function staticMatchReason(rule: LoadedRule): MatchReason | null {
-	if (rule.frontmatter.alwaysApply === true) {
-		return "alwaysApply";
-	}
-
-	if (rule.isSingleFile) {
-		return "single-file";
-	}
-
-	return null;
+function staticMatchReason(rule: LoadedRule, matchRuleImpl: typeof matchRule): MatchReason | null {
+	const result = matchRuleImpl({
+		frontmatter: rule.frontmatter,
+		isSingleFile: rule.isSingleFile,
+		frontmatterMalformed: rule.frontmatterMalformed,
+		pathBases: null,
+	});
+	return result.matched ? result.reason : null;
 }
 
 function disabledSourcesFor(config: PiRulesConfig): ReadonlySet<string> | undefined {

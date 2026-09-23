@@ -69,6 +69,8 @@ export interface LoadedRule extends RuleCandidate {
 	frontmatter: RuleFrontmatter;
 	body: string;
 	contentHash: string;
+	/** True when the frontmatter could not be parsed; scope is unknown, so it never loads. */
+	frontmatterMalformed: boolean;
 	matchReason: MatchReason;
 }
 
@@ -93,8 +95,64 @@ export type RuleSource =
 /**
  * Why a candidate matched the target file. Surfaced in the injection block so
  * the model can attribute its behavior to a specific rule.
+ *
+ * `always-apply-default` marks a directory rule with no scope in its frontmatter:
+ * no `globs`/`paths`/`applyTo` and no explicit `alwaysApply: false`. Claude Code,
+ * Cursor and Copilot all treat "no scope" as "every file", so these rules load
+ * without any target file.
  */
-export type MatchReason = "alwaysApply" | "single-file" | { kind: "glob"; pattern: string } | { kind: "no-match" };
+export type MatchReason =
+	| "alwaysApply"
+	| "always-apply-default"
+	| "single-file"
+	| { kind: "glob"; pattern: string }
+	| { kind: "no-match" };
+
+/**
+ * Applicability of a discovered rule, derived from frontmatter alone.
+ */
+export type RuleScope =
+	| { kind: "single-file" }
+	| { kind: "always-apply" }
+	| { kind: "always-apply-default" }
+	| { kind: "globs"; patterns: readonly string[] }
+	/** Explicit `alwaysApply: false` without globs: no target can ever match it. */
+	| { kind: "inactive" }
+	/**
+	 * Frontmatter could not be parsed, so the scope is unknown. The rule never
+	 * loads — an author who wrote a broken `paths:` must not get an always-on rule.
+	 */
+	| { kind: "malformed-frontmatter" };
+
+/**
+ * One discovered rule as reported by `engine.inspectRules`. This is the
+ * observability surface behind `/rules list`, `/rules paths` and `/rules show`:
+ * it covers every candidate, including rules that are scoped to globs and
+ * therefore never load statically.
+ */
+export interface RuleInspection {
+	path: string;
+	realPath: string;
+	relativePath: string;
+	source: RuleSource;
+	/** Derived applicability; `null` when the rule file could not be loaded. */
+	scope: RuleScope | null;
+	/** Whether the rule loads without any target file (static injection). */
+	appliesStatically: boolean;
+	/** Whether this session already injected the rule into the system prompt. */
+	injectedStatically: boolean;
+	/** Relative path of the nearer rule that wins over this one, when shadowed. */
+	shadowedBy?: string;
+	/** Rule body, empty when the file could not be read. */
+	body: string;
+	/** Per-rule load problems (unreadable file, outside project root, malformed frontmatter). */
+	diagnostics: readonly string[];
+}
+
+export interface RuleDiscoveryReport {
+	rules: RuleInspection[];
+	diagnostics: RuleDiagnostic[];
+}
 
 /**
  * Truncation result.

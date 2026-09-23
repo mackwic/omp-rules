@@ -81,6 +81,26 @@ Rules are Markdown files with an optional YAML frontmatter block:
 | `applyTo` | `string \| string[]` | GitHub Copilot alias for globs (merged) |
 | `alwaysApply` | `boolean` | If true, rule always applies regardless of target |
 
+### When a rule applies
+
+A rule file that declares no scope at all — no `globs`, no `paths`, no `applyTo` and no
+explicit `alwaysApply: false` — applies to every file. That matches the Claude Code
+convention where `paths`-less `.claude/rules/*.md` files are always loaded, and the
+Cursor / Copilot defaults of "no scope means all files".
+
+| Frontmatter | When it loads |
+|-------------|---------------|
+| *(none)*, or `description` only | always (default scope) |
+| `alwaysApply: true` | always |
+| `globs` / `paths` / `applyTo` | only for target files matching a pattern |
+| `alwaysApply: false`, no globs | never (explicit opt-out) |
+| malformed YAML frontmatter | never (scope unknown — fix the file, the load diagnostic says why) |
+
+An empty glob list is parsed as "no scope", so `globs: []` also means always.
+
+`AGENTS.md`, `CLAUDE.md`, `CONTEXT.md` and `.github/copilot-instructions.md` are single-file
+rules and always load; at the project root the first match wins in that order.
+
 Example rule file:
 
 ```markdown
@@ -109,14 +129,27 @@ Deduplication is in-memory per session by `realPath + content hash`. No filesyst
 
 | Command | Purpose |
 |---------|---------|
-| `/rules` | Summary of active rules |
-| `/rules list` | List all rule files with paths |
-| `/rules show <id>` | Show body of one rule |
+| `/rules` | Summary of discovered rules |
+| `/rules list` | List every discovered rule with its source and scope |
+| `/rules show <id>` | Show body of one rule (any discovered rule, including file-scoped ones) |
 | `/rules paths` | List absolute paths only |
 | `/rules status` | Counts and warnings |
 | `/reload-rules` | Rescan and clear injection cache |
 
 All commands work in both UI and plain-text modes.
+
+`/rules list` reports the whole discovery report, not only the rules that were injected, so
+a rule that is not currently loaded still shows up with the reason:
+
+```text
+.claude/rules/project-context.md [.claude/rules, alwaysApply (default: no scope), in system prompt]
+.claude/rules/documentation.md [.claude/rules, globs: apps/documentation/**]
+.claude/rules/disabled.md [.claude/rules, inactive (alwaysApply: false)]
+CLAUDE.md [CLAUDE.md, single-file, shadowed by AGENTS.md]
+```
+
+`globs: …` rules load on demand once a matching file is read, edited or written;
+`inactive` rules never load; `shadowed by …` rules lose first-match-wins at the project root.
 
 ## Configuration
 
@@ -142,6 +175,7 @@ Rule files are prompt and context input. Do NOT load untrusted repositories. All
 | Symptom | Fix |
 |---------|-----|
 | Extension not loaded | Run `omp install git:github.com:mackwic/omp-rules` again, or use `omp -e ./src/index.ts` for a one-shot test. |
+| `.claude/rules/` files missing from `/rules list` | Run `/reload-rules` then `/rules list`: every discovered rule is listed with its scope. `globs: …` rules are file-scoped and load on demand, `inactive (alwaysApply: false)` rules never load, `shadowed by …` rules lost first-match-wins. |
 | Context too large | Adjust `PI_RULES_MAX_RULE_CHARS` and `PI_RULES_MAX_RESULT_CHARS`. |
 
 ## Development

@@ -1,4 +1,11 @@
-import type { LoadedRule, ParsedRule, RuleCandidate, RuleFrontmatter, RuleSource } from "../../src/rules/types.js";
+import type {
+	LoadedRule,
+	ParsedRule,
+	RuleCandidate,
+	RuleFrontmatter,
+	RuleInspection,
+	RuleSource,
+} from "../../src/rules/types.js";
 
 export function frontmatterBlock(meta: Partial<RuleFrontmatter>): string {
 	const lines: string[] = ["---"];
@@ -58,6 +65,7 @@ export function makeLoadedRule(overrides: Partial<LoadedRule> = {}): LoadedRule 
 		frontmatter: overrides.frontmatter ?? {},
 		body: overrides.body ?? "Sample rule body.",
 		contentHash: overrides.contentHash ?? "deadbeef",
+		frontmatterMalformed: overrides.frontmatterMalformed ?? false,
 		matchReason: overrides.matchReason ?? "alwaysApply",
 	};
 }
@@ -69,4 +77,22 @@ export function makeParsedRule(overrides: Partial<ParsedRule> = {}): ParsedRule 
 	};
 	if (overrides.diagnostic !== undefined) parsed.diagnostic = overrides.diagnostic;
 	return parsed;
+}
+
+export function makeRuleInspection(overrides: Partial<RuleInspection> = {}): RuleInspection {
+	const path = overrides.path ?? "/tmp/sample/.omo/rules/sample.md";
+	const inspection: RuleInspection = {
+		path,
+		realPath: overrides.realPath ?? path,
+		relativePath: overrides.relativePath ?? ".omo/rules/sample.md",
+		source: overrides.source ?? ".omo/rules",
+		// `null` means "could not load", so it must survive the spread.
+		scope: overrides.scope === undefined ? { kind: "always-apply" } : overrides.scope,
+		appliesStatically: overrides.appliesStatically ?? true,
+		injectedStatically: overrides.injectedStatically ?? false,
+		body: overrides.body ?? "Sample rule body.",
+		diagnostics: overrides.diagnostics ?? [],
+	};
+	if (overrides.shadowedBy !== undefined) inspection.shadowedBy = overrides.shadowedBy;
+	return inspection;
 }

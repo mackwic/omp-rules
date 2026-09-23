@@ -2,13 +2,34 @@ import { describe, expect, it, vi } from "vitest";
 import { registerSlashCommands } from "../src/commands.js";
 import type { Engine } from "../src/rules/engine.js";
 import { defaultConfig } from "../src/rules/engine.js";
-import type { LoadedRule, RuleDiagnostic } from "../src/rules/types.js";
+import { deriveRuleScope, matchRule } from "../src/rules/matcher.js";
+import type { LoadedRule, RuleDiagnostic, RuleInspection } from "../src/rules/types.js";
 import { createFakePi } from "./helpers/fake-pi.js";
-import { makeLoadedRule } from "./helpers/rule-fixtures.js";
+import { makeLoadedRule, makeRuleInspection } from "./helpers/rule-fixtures.js";
+
+function ruleToInspection(rule: LoadedRule): RuleInspection {
+	return {
+		path: rule.path,
+		realPath: rule.realPath,
+		relativePath: rule.relativePath,
+		source: rule.source,
+		scope: deriveRuleScope(rule.frontmatter, rule.isSingleFile, rule.frontmatterMalformed),
+		appliesStatically: matchRule({
+			frontmatter: rule.frontmatter,
+			isSingleFile: rule.isSingleFile,
+			frontmatterMalformed: rule.frontmatterMalformed,
+			pathBases: null,
+		}).matched,
+		injectedStatically: false,
+		body: rule.body,
+		diagnostics: [],
+	};
+}
 
 function createStubEngine(
 	options: {
 		rules?: LoadedRule[];
+		inspections?: RuleInspection[];
 		diagnostics?: RuleDiagnostic[];
 		resetSession?: (cwd?: string) => void;
 		loadStaticRules?: (cwd: string) => { rules: LoadedRule[]; diagnostics: RuleDiagnostic[] };
@@ -18,6 +39,7 @@ function createStubEngine(
 		makeLoadedRule({ path: "/tmp/test/foo.md", relativePath: "foo.md", body: "Rule body" }),
 	];
 	const diagnostics = options.diagnostics ?? [];
+	const inspections = options.inspections ?? rules.map(ruleToInspection);
 
 	return {
 		state: {
@@ -31,6 +53,7 @@ function createStubEngine(
 		config: defaultConfig(),
 		loadStaticRules: options.loadStaticRules ?? (() => ({ rules, diagnostics })),
 		loadDynamicRules: () => ({ rules: [], diagnostics: [] }),
+		inspectRules: () => ({ rules: inspections, diagnostics }),
 		formatStatic: () => "static block",
 		formatDynamic: () => "dynamic block",
 		resetSession: options.resetSession ?? (() => {}),
@@ -72,7 +95,9 @@ describe("registerSlashCommands", () => {
 		await command?.options.handler("", fakePi.makeCommandCtx({ cwd: "/tmp/test", hasUI: true }));
 
 		// then
-		expect(fakePi.notifications).toEqual([{ message: "pi-rules: 1 rules from 1 sources", severity: "info" }]);
+		expect(fakePi.notifications).toEqual([
+			{ message: "pi-rules: 1 rules from 1 sources (1 always applied, 0 file-scoped)", severity: "info" },
+		]);
 	});
 
 	it('#given /rules with "list" subcommand #when invoked #then notify text contains rule paths', async () => {
@@ -140,7 +165,7 @@ describe("registerSlashCommands", () => {
 		expect(fakePi.notifications).toEqual([{ message: "/tmp/test/foo.md\n/tmp/test/bar.md", severity: "info" }]);
 	});
 
-	it('#given /rules with empty engine.state.loadedRules #when invoked #then summary shows "0 rules"', async () => {
+	it('#given /rules with no discovered rules #when invoked #then summary shows "0 rules"', async () => {
 		// given
 		const fakePi = registerCommands(createStubEngine({ rules: [] }));
 		const command = fakePi.commands.find((candidate) => candidate.name === "rules");
@@ -149,7 +174,9 @@ describe("registerSlashCommands", () => {
 		await command?.options.handler("", fakePi.makeCommandCtx({ cwd: "/tmp/test" }));
 
 		// then
-		expect(fakePi.notifications).toEqual([{ message: "pi-rules: 0 rules from 0 sources", severity: "info" }]);
+		expect(fakePi.notifications).toEqual([
+			{ message: "pi-rules: 0 rules from 0 sources (0 always applied, 0 file-scoped)", severity: "info" },
+		]);
 	});
 
 	it("#given /reload-rules invoked #when called #then engine.resetSession called", async () => {
@@ -187,7 +214,9 @@ describe("registerSlashCommands", () => {
 		await command?.options.handler("", fakePi.makeCommandCtx({ cwd: "/tmp/test", hasUI: true }));
 
 		// then
-		expect(fakePi.notifications).toEqual([{ message: "Reloaded 1 rules from 1 sources", severity: "info" }]);
+		expect(fakePi.notifications).toEqual([
+			{ message: "Reloaded: 1 rules from 1 sources (1 always applied, 0 file-scoped)", severity: "info" },
+		]);
 	});
 
 	it('#given /rules getArgumentCompletions("li") #when called #then returns ["list"]', async () => {
@@ -235,7 +264,9 @@ describe("registerSlashCommands", () => {
 		await command?.options.handler("status", fakePi.makeCommandCtx({ cwd: "/tmp/test", hasUI: false }));
 
 		// then
-		expect(fakePi.notifications).toEqual([{ message: "pi-rules: 1 rules from 1 sources", severity: "info" }]);
+		expect(fakePi.notifications).toEqual([
+			{ message: "pi-rules: 1 rules from 1 sources (1 always applied, 0 file-scoped)", severity: "info" },
+		]);
 	});
 
 	it("#given hasUI=false #when /reload-rules invoked #then engine.resetSession still called and notify still works", async () => {
@@ -249,6 +280,184 @@ describe("registerSlashCommands", () => {
 
 		// then
 		expect(resetSession).toHaveBeenCalledWith("/tmp/test");
-		expect(fakePi.notifications).toEqual([{ message: "Reloaded 1 rules from 1 sources", severity: "info" }]);
+		expect(fakePi.notifications).toEqual([
+			{ message: "Reloaded: 1 rules from 1 sources (1 always applied, 0 file-scoped)", severity: "info" },
+		]);
+	});
+
+	it("#given glob-scoped rule #when /rules list invoked #then scope patterns are listed", async () => {
+		// given
+		const globRule = makeRuleInspection({
+			path: "/tmp/test/.claude/rules/documentation.md",
+			relativePath: ".claude/rules/documentation.md",
+			source: ".claude/rules",
+			scope: { kind: "globs", patterns: ["apps/documentation/**"] },
+			appliesStatically: false,
+		});
+		const fakePi = registerCommands(createStubEngine({ inspections: [globRule] }));
+		const command = fakePi.commands.find((candidate) => candidate.name === "rules");
+
+		// when
+		await command?.options.handler("list", fakePi.makeCommandCtx({ cwd: "/tmp/test" }));
+
+		// then
+		expect(fakePi.notifications).toEqual([
+			{ message: ".claude/rules/documentation.md [.claude/rules, globs: apps/documentation/**]", severity: "info" },
+		]);
+	});
+
+	it("#given injected unscoped rule #when /rules list invoked #then default scope and injection marker are listed", async () => {
+		// given
+		const plainRule = makeRuleInspection({
+			path: "/tmp/test/.claude/rules/project-context.md",
+			relativePath: ".claude/rules/project-context.md",
+			source: ".claude/rules",
+			scope: { kind: "always-apply-default" },
+			injectedStatically: true,
+		});
+		const fakePi = registerCommands(createStubEngine({ inspections: [plainRule] }));
+		const command = fakePi.commands.find((candidate) => candidate.name === "rules");
+
+		// when
+		await command?.options.handler("list", fakePi.makeCommandCtx({ cwd: "/tmp/test" }));
+
+		// then
+		expect(fakePi.notifications).toEqual([
+			{
+				message:
+					".claude/rules/project-context.md [.claude/rules, alwaysApply (default: no scope), in system prompt]",
+				severity: "info",
+			},
+		]);
+	});
+
+	it("#given shadowed single-file rule #when /rules list invoked #then the shadowing rule is listed", async () => {
+		// given
+		const shadowed = makeRuleInspection({
+			path: "/tmp/test/CLAUDE.md",
+			relativePath: "CLAUDE.md",
+			source: "CLAUDE.md",
+			scope: { kind: "single-file" },
+			shadowedBy: "AGENTS.md",
+		});
+		const fakePi = registerCommands(createStubEngine({ inspections: [shadowed] }));
+		const command = fakePi.commands.find((candidate) => candidate.name === "rules");
+
+		// when
+		await command?.options.handler("list", fakePi.makeCommandCtx({ cwd: "/tmp/test" }));
+
+		// then
+		expect(fakePi.notifications).toEqual([
+			{ message: "CLAUDE.md [CLAUDE.md, single-file, shadowed by AGENTS.md]", severity: "info" },
+		]);
+	});
+
+	it("#given mixed rules #when /rules status invoked #then applied and file-scoped counts are reported", async () => {
+		// given
+		const plainRule = makeRuleInspection({
+			relativePath: ".claude/rules/project-context.md",
+			source: ".claude/rules",
+			scope: { kind: "always-apply-default" },
+		});
+		const globRule = makeRuleInspection({
+			relativePath: ".cursor/rules/documentation.mdc",
+			source: ".cursor/rules",
+			scope: { kind: "globs", patterns: ["apps/documentation/**"] },
+			appliesStatically: false,
+		});
+		const fakePi = registerCommands(createStubEngine({ inspections: [plainRule, globRule] }));
+		const command = fakePi.commands.find((candidate) => candidate.name === "rules");
+
+		// when
+		await command?.options.handler("status", fakePi.makeCommandCtx({ cwd: "/tmp/test" }));
+
+		// then
+		expect(fakePi.notifications).toEqual([
+			{ message: "pi-rules: 2 rules from 2 sources (1 always applied, 1 file-scoped)", severity: "info" },
+		]);
+	});
+
+	it("#given glob-scoped rule #when /rules show invoked with a unique suffix #then the body is returned", async () => {
+		// given
+		const globRule = makeRuleInspection({
+			relativePath: ".claude/rules/documentation.md",
+			source: ".claude/rules",
+			scope: { kind: "globs", patterns: ["apps/documentation/**"] },
+			body: "Update the docs index when adding a page.",
+		});
+		const fakePi = registerCommands(createStubEngine({ inspections: [globRule] }));
+		const command = fakePi.commands.find((candidate) => candidate.name === "rules");
+
+		// when
+		await command?.options.handler("show documentation.md", fakePi.makeCommandCtx({ cwd: "/tmp/test" }));
+
+		// then
+		expect(fakePi.notifications).toEqual([
+			{ message: "Update the docs index when adding a page.", severity: "info" },
+		]);
+	});
+
+	it("#given unreadable rule #when /rules show invoked #then error notify with the load diagnostics", async () => {
+		// given
+		const unreadable = makeRuleInspection({
+			path: "/tmp/test/.omo/rules/broken.md",
+			relativePath: ".omo/rules/broken.md",
+			scope: null,
+			body: "",
+			diagnostics: ["Unable to read rule file"],
+		});
+		const fakePi = registerCommands(createStubEngine({ inspections: [unreadable] }));
+		const command = fakePi.commands.find((candidate) => candidate.name === "rules");
+
+		// when
+		await command?.options.handler("show .omo/rules/broken.md", fakePi.makeCommandCtx({ cwd: "/tmp/test" }));
+
+		// then
+		expect(fakePi.notifications).toEqual([
+			{ message: "Rule not readable: .omo/rules/broken.md (Unable to read rule file)", severity: "error" },
+		]);
+	});
+
+	it("#given malformed-frontmatter rule #when /rules list invoked #then it is reported as not loaded", async () => {
+		// given
+		const malformed = makeRuleInspection({
+			path: "/tmp/test/.omo/rules/bad.md",
+			relativePath: ".omo/rules/bad.md",
+			source: ".omo/rules",
+			scope: { kind: "malformed-frontmatter" },
+			appliesStatically: false,
+			diagnostics: ["Malformed frontmatter: Unclosed inline array"],
+		});
+		const fakePi = registerCommands(createStubEngine({ inspections: [malformed] }));
+		const command = fakePi.commands.find((candidate) => candidate.name === "rules");
+
+		// when
+		await command?.options.handler("list", fakePi.makeCommandCtx({ cwd: "/tmp/test" }));
+
+		// then
+		expect(fakePi.notifications).toEqual([
+			{
+				message: ".omo/rules/bad.md [.omo/rules, malformed frontmatter (not loaded), 1 diagnostics]",
+				severity: "info",
+			},
+		]);
+	});
+
+	it("#given glob-scoped rule #when /rules paths invoked #then its absolute path is included", async () => {
+		// given
+		const globRule = makeRuleInspection({
+			path: "/tmp/test/.claude/rules/documentation.md",
+			relativePath: ".claude/rules/documentation.md",
+			scope: { kind: "globs", patterns: ["apps/documentation/**"] },
+			appliesStatically: false,
+		});
+		const fakePi = registerCommands(createStubEngine({ inspections: [globRule] }));
+		const command = fakePi.commands.find((candidate) => candidate.name === "rules");
+
+		// when
+		await command?.options.handler("paths", fakePi.makeCommandCtx({ cwd: "/tmp/test" }));
+
+		// then
+		expect(fakePi.notifications).toEqual([{ message: "/tmp/test/.claude/rules/documentation.md", severity: "info" }]);
 	});
 });

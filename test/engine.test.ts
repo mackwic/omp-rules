@@ -1,9 +1,12 @@
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_MAX_RESULT_CHARS, DEFAULT_MAX_RULE_CHARS } from "../src/rules/constants.js";
 import { createEngine, type DynamicTargetFingerprint, defaultConfig, type EngineDeps } from "../src/rules/engine.js";
+import { findRuleCandidates } from "../src/rules/finder.js";
 import { matchRule as defaultMatchRule } from "../src/rules/matcher.js";
+import { findProjectRoot } from "../src/rules/project-root.js";
 import type { LoadedRule, PiRulesConfig, RuleCandidate, RuleSource } from "../src/rules/types.js";
 import { createTempFs } from "./helpers/temp-fs.js";
 
@@ -32,6 +35,7 @@ function makeRule(overrides: Partial<LoadedRule> = {}): LoadedRule {
 		frontmatter: overrides.frontmatter ?? {},
 		body: overrides.body ?? "Sample rule body.",
 		contentHash: overrides.contentHash ?? "hash",
+		frontmatterMalformed: overrides.frontmatterMalformed ?? false,
 		matchReason: overrides.matchReason ?? "alwaysApply",
 	};
 }
@@ -178,6 +182,44 @@ describe("loadStaticRules", () => {
 		expect(result.rules).toEqual([]);
 	});
 
+	it('#given directory rule without frontmatter scope #when loadStaticRules #then included with matchReason "always-apply-default"', () => {
+		// given
+		const candidate = makeCandidate({
+			path: `${PROJECT_ROOT}/.claude/rules/project-context.md`,
+			realPath: `${PROJECT_ROOT}/.claude/rules/project-context.md`,
+			source: ".claude/rules",
+			relativePath: ".claude/rules/project-context.md",
+		});
+		const engine = createTestEngine(
+			{},
+			[candidate],
+			new Map([[candidate.path, "# Project context\n\nNo frontmatter scope."]]),
+		);
+
+		// when
+		const result = engine.loadStaticRules(PROJECT_ROOT);
+
+		// then
+		expect(result.rules).toHaveLength(1);
+		expect(result.rules[0]?.matchReason).toBe("always-apply-default");
+	});
+
+	it("#given rule with alwaysApply false and no globs #when loadStaticRules #then NOT included (explicit opt-out)", () => {
+		// given
+		const candidate = makeCandidate();
+		const engine = createTestEngine(
+			{},
+			[candidate],
+			new Map([[candidate.path, ruleMarkdown("alwaysApply: false", "Never applied.")]]),
+		);
+
+		// when
+		const result = engine.loadStaticRules(PROJECT_ROOT);
+
+		// then
+		expect(result.rules).toEqual([]);
+	});
+
 	it("#given AGENTS.md and CLAUDE.md both at project root #when loadStaticRules #then ONLY AGENTS.md included (first-match-wins per priority)", () => {
 		// given
 		const agents = makeCandidate({
@@ -273,6 +315,7 @@ describe("loadStaticRules", () => {
 		expect(result.diagnostics).toHaveLength(1);
 		expect(result.diagnostics[0]?.source).toBe(malformed.path);
 		expect(result.rules.map((rule) => rule.path)).toContain(valid.path);
+		expect(result.rules.map((rule) => rule.path)).not.toContain(malformed.path);
 	});
 
 	it("#given readFile returns null #when loadStaticRules #then diagnostic recorded for that path, other rules loaded", () => {
@@ -410,6 +453,60 @@ describe("loadDynamicRules", () => {
 
 		// then
 		expect(result.rules).toEqual([]);
+	});
+
+	it('#given directory rule without frontmatter scope #when loadDynamicRules #then included with matchReason "always-apply-default"', () => {
+		// given
+		const candidate = makeCandidate({
+			path: `${PROJECT_ROOT}/.claude/rules/project-context.md`,
+			realPath: `${PROJECT_ROOT}/.claude/rules/project-context.md`,
+			source: ".claude/rules",
+			relativePath: ".claude/rules/project-context.md",
+		});
+		const engine = createTestEngine({}, [candidate], new Map([[candidate.path, "# Project context"]]));
+
+		// when
+		const result = engine.loadDynamicRules(PROJECT_ROOT, [`${PROJECT_ROOT}/src/index.ts`]);
+
+		// then
+		expect(result.rules).toHaveLength(1);
+		expect(result.rules[0]?.matchReason).toBe("always-apply-default");
+	});
+
+	it("#given target reached through a symlinked directory #when loadDynamicRules #then glob rules still match (canonical project root)", () => {
+		// given
+		const tempFs = createTempFs("pi-rules-engine-");
+		try {
+			tempFs.writeJson("project/package.json", { name: "fixture" });
+			tempFs.write(
+				"project/.claude/rules/documentation.md",
+				ruleMarkdown("paths: apps/documentation/**", "Docs rule."),
+			);
+			tempFs.write("project/apps/documentation/index.md", "# docs\n");
+			const linkedProject = tempFs.symlink(tempFs.path("project"), "linked-project");
+			const engine = createEngine(defaultConfig(), {
+				findCandidates: (options) => findRuleCandidates({ ...options, homeDir: tempFs.path("home") }),
+				readFile: (path) => {
+					try {
+						return readFileSync(path, "utf-8");
+					} catch {
+						return null;
+					}
+				},
+				findProjectRoot,
+				extractToolPaths: () => [],
+			});
+
+			// when
+			const result = engine.loadDynamicRules(linkedProject, [
+				join(linkedProject, "apps", "documentation", "index.md"),
+			]);
+
+			// then
+			expect(result.rules.map((rule) => rule.relativePath)).toEqual([".claude/rules/documentation.md"]);
+		} finally {
+			tempFs.cleanup();
+		}
 	});
 
 	it("#given alwaysApply rule and target #when loadDynamicRules #then alwaysApply rule included", () => {
@@ -993,5 +1090,145 @@ describe("session state", () => {
 		expect(result).toEqual({ rules: [], diagnostics: [] });
 		expect(engine.state.loadedRules).toEqual([]);
 		expect(engine.state.diagnostics).toEqual([]);
+	});
+});
+
+describe("inspectRules", () => {
+	const globRule = makeCandidate({
+		path: `${PROJECT_ROOT}/.claude/rules/documentation.md`,
+		realPath: `${PROJECT_ROOT}/.claude/rules/documentation.md`,
+		source: ".claude/rules",
+		relativePath: ".claude/rules/documentation.md",
+	});
+	const plainRule = makeCandidate({
+		path: `${PROJECT_ROOT}/.claude/rules/project-context.md`,
+		realPath: `${PROJECT_ROOT}/.claude/rules/project-context.md`,
+		source: ".claude/rules",
+		relativePath: ".claude/rules/project-context.md",
+	});
+	const claudeRules = new Map<string, string | null>([
+		[globRule.path, ruleMarkdown("paths: apps/documentation/**", "Docs rule.")],
+		[plainRule.path, "# Project context\n\nNo frontmatter scope."],
+	]);
+
+	it("#given glob-scoped and unscoped rules #when inspectRules #then both are reported with their derived scope", () => {
+		// given
+		const engine = createTestEngine({}, [globRule, plainRule], claudeRules);
+
+		// when
+		const report = engine.inspectRules(PROJECT_ROOT);
+
+		// then
+		expect(report.rules.map((rule) => [rule.relativePath, rule.scope, rule.appliesStatically])).toEqual([
+			[".claude/rules/documentation.md", { kind: "globs", patterns: ["apps/documentation/**"] }, false],
+			[".claude/rules/project-context.md", { kind: "always-apply-default" }, true],
+		]);
+	});
+
+	it("#given glob-scoped rule #when inspectRules after loadStaticRules #then report is a superset while session state keeps only static rules", () => {
+		// given
+		const engine = createTestEngine({}, [globRule, plainRule], claudeRules);
+		const loaded = engine.loadStaticRules(PROJECT_ROOT);
+		expect(loaded.rules.map((rule) => rule.relativePath)).toEqual([".claude/rules/project-context.md"]);
+
+		// when
+		const report = engine.inspectRules(PROJECT_ROOT);
+
+		// then
+		expect(report.rules.map((rule) => rule.relativePath)).toEqual([
+			".claude/rules/documentation.md",
+			".claude/rules/project-context.md",
+		]);
+		expect(engine.state.loadedRules.map((rule) => rule.relativePath)).toEqual([".claude/rules/project-context.md"]);
+	});
+
+	it("#given unreadable rule file #when inspectRules #then entry has null scope and per-rule diagnostics", () => {
+		// given
+		const missing = makeCandidate({
+			path: `${PROJECT_ROOT}/.omo/rules/missing.md`,
+			relativePath: ".omo/rules/missing.md",
+		});
+		const engine = createTestEngine({}, [missing], new Map());
+
+		// when
+		const report = engine.inspectRules(PROJECT_ROOT);
+
+		// then
+		expect(report.rules[0]?.scope).toBeNull();
+		expect(report.rules[0]?.diagnostics).toEqual(["Unable to read rule file"]);
+		expect(report.diagnostics).toContainEqual({
+			severity: "warning",
+			source: missing.path,
+			message: "Unable to read rule file",
+		});
+	});
+
+	it("#given AGENTS.md and CLAUDE.md at project root #when inspectRules #then CLAUDE.md is reported as shadowed", () => {
+		// given
+		const agents = makeCandidate({
+			path: `${PROJECT_ROOT}/AGENTS.md`,
+			realPath: `${PROJECT_ROOT}/AGENTS.md`,
+			source: "AGENTS.md",
+			isSingleFile: true,
+			relativePath: "AGENTS.md",
+		});
+		const claude = makeCandidate({
+			path: `${PROJECT_ROOT}/CLAUDE.md`,
+			realPath: `${PROJECT_ROOT}/CLAUDE.md`,
+			source: "CLAUDE.md",
+			isSingleFile: true,
+			relativePath: "CLAUDE.md",
+		});
+		const engine = createTestEngine(
+			{},
+			[claude, agents],
+			new Map([
+				[agents.path, "Agents rule."],
+				[claude.path, "Claude rule."],
+			]),
+		);
+
+		// when
+		const report = engine.inspectRules(PROJECT_ROOT);
+
+		// then
+		expect(report.rules.map((rule) => rule.relativePath)).toEqual(["AGENTS.md", "CLAUDE.md"]);
+		expect(report.rules[0]?.shadowedBy).toBeUndefined();
+		expect(report.rules[1]?.shadowedBy).toBe("AGENTS.md");
+	});
+
+	it("#given statically injected rule #when inspectRules #then injectedStatically is true for that rule only", () => {
+		// given
+		const engine = createTestEngine({}, [globRule, plainRule], claudeRules);
+		const injected = engine.loadStaticRules(PROJECT_ROOT).rules[0];
+		expect(injected).toBeDefined();
+		engine.markStaticInjected(injected as LoadedRule);
+
+		// when
+		const report = engine.inspectRules(PROJECT_ROOT);
+
+		// then
+		expect(report.rules.map((rule) => rule.injectedStatically)).toEqual([false, true]);
+	});
+
+	it("#given malformed frontmatter #when inspectRules #then the rule reports unknown scope and never applies", () => {
+		// given
+		const malformed = makeCandidate({
+			path: `${PROJECT_ROOT}/.omo/rules/bad.md`,
+			relativePath: ".omo/rules/bad.md",
+		});
+		const engine = createTestEngine(
+			{},
+			[malformed],
+			new Map([[malformed.path, "---\nglobs: [unclosed\n---\nMalformed body."]]),
+		);
+
+		// when
+		const report = engine.inspectRules(PROJECT_ROOT);
+
+		// then
+		expect(report.rules[0]?.scope).toEqual({ kind: "malformed-frontmatter" });
+		expect(report.rules[0]?.appliesStatically).toBe(false);
+		expect(report.rules[0]?.diagnostics).toEqual(["Malformed frontmatter: Unclosed inline array"]);
 	});
 });

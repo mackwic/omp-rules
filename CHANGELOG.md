@@ -10,11 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Matcher cache reset and stats helpers for deterministic cache verification.
+- `engine.inspectRules` reports every discovered rule with its derived scope, static applicability, shadowing rule and per-rule load diagnostics.
+- `/rules list`, `/rules paths` and `/rules show` now cover the whole discovery report, including rules scoped to globs that are not currently injected.
 
 ### Changed
 
 - Glob matching now reuses a bounded compiled matcher cache instead of recompiling picomatch patterns for every file.
 - Dynamic rule loading now deduplicates repeated target paths and rule-file parsing work.
+- A directory rule with no `globs`/`paths`/`applyTo` and no explicit `alwaysApply: false` now applies to every file instead of never loading, matching Claude Code, Cursor and Copilot defaults. Static and dynamic applicability share one matcher decision.
+- A rule whose frontmatter fails to parse keeps not loading (its scope is unknown) instead of falling back to the unscoped default; `/rules list` reports it as `malformed frontmatter (not loaded)`.
+- `/rules` and `/rules status` report discovered / always-applied / file-scoped counts instead of only injected static rules.
 
 ### Fixed
 
@@ -23,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dynamic injection now skips rules already injected statically or already loaded by pi's native context loader.
 - `before_agent_start` now supports OMP releases that do not expose `systemPromptOptions`, while retaining native context-file deduplication when the field is available.
 - Dynamic rule loading now preserves each target file's project root so nested projects load their nearest rules correctly.
+- Targets reached through a symlinked path (`/tmp` vs `/private/tmp` on macOS) are canonicalized before discovery and path matching, so glob rules match and the walk-up stops at the real project root instead of scanning ancestor directories.
 
 ## [0.1.0] - 2026-04-29
 

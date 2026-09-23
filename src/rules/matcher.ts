@@ -1,12 +1,27 @@
 import { createHash } from "node:crypto";
 import picomatch from "picomatch";
-import type { MatchReason, RuleFrontmatter } from "./types.js";
+import type { MatchReason, RuleFrontmatter, RuleScope } from "./types.js";
+
+export interface PathBases {
+	projectRelative: string;
+	scopeRelative?: string;
+	basename: string;
+}
 
 export interface MatcherInput {
 	frontmatter: RuleFrontmatter;
 	isSingleFile: boolean;
-	/** Path bases to try matching against (POSIX-normalized). */
-	pathBases: { projectRelative: string; scopeRelative?: string; basename: string };
+	/**
+	 * True when the rule's frontmatter could not be parsed. The declared scope is
+	 * unknown, so the rule never matches instead of defaulting to always-apply.
+	 */
+	frontmatterMalformed?: boolean;
+	/**
+	 * Path bases to try matching against (POSIX-normalized), or `null` when no
+	 * target file is known (static load). With `null`, glob-scoped rules report
+	 * no match while every unscoped rule still matches.
+	 */
+	pathBases: PathBases | null;
 }
 
 export interface MatchResult {
@@ -30,17 +45,55 @@ const PICOMATCH_OPTIONS = { bash: true, dot: true };
 const MAX_COMPILED_PATTERN_SET_CACHE_ENTRIES = 256;
 const compiledPatternSets = new Map<string, CompiledPatternSet>();
 
+/**
+ * Derive a rule's applicability from its frontmatter alone.
+ *
+ * This is the single source of truth for both static and dynamic loads: static
+ * loading calls `matchRule` with `pathBases: null`, so a rule can never be
+ * "static only" or "dynamic only" by accident.
+ */
+export function deriveRuleScope(
+	frontmatter: RuleFrontmatter,
+	isSingleFile: boolean,
+	frontmatterMalformed = false,
+): RuleScope {
+	// Single-file rules (AGENTS.md, CLAUDE.md, …) ignore frontmatter entirely.
+	if (isSingleFile) {
+		return { kind: "single-file" };
+	}
+
+	if (frontmatterMalformed) {
+		return { kind: "malformed-frontmatter" };
+	}
+
+	if (frontmatter.alwaysApply === true) {
+		return { kind: "always-apply" };
+	}
+
+	const patterns = normalizeGlobs(frontmatter);
+	if (patterns.length > 0) {
+		return { kind: "globs", patterns };
+	}
+
+	return frontmatter.alwaysApply === false ? { kind: "inactive" } : { kind: "always-apply-default" };
+}
+
 export function matchRule(input: MatcherInput): MatchResult {
-	if (input.isSingleFile) {
+	const scope = deriveRuleScope(input.frontmatter, input.isSingleFile, input.frontmatterMalformed === true);
+
+	if (scope.kind === "single-file") {
 		return { matched: true, reason: "single-file" };
 	}
 
-	if (input.frontmatter.alwaysApply === true) {
+	if (scope.kind === "always-apply") {
 		return { matched: true, reason: "alwaysApply" };
 	}
 
-	const patterns = normalizeGlobs(input.frontmatter);
-	if (patterns.length === 0) {
+	if (scope.kind === "always-apply-default") {
+		return { matched: true, reason: "always-apply-default" };
+	}
+
+	if (scope.kind === "inactive" || scope.kind === "malformed-frontmatter" || input.pathBases === null) {
 		return noMatch();
 	}
 
@@ -50,7 +103,7 @@ export function matchRule(input: MatcherInput): MatchResult {
 		normalizePath(input.pathBases.basename),
 	].filter((pathBase): pathBase is string => pathBase !== undefined);
 
-	const { positiveMatchers, negativeMatchers } = compiledPatternSetFor(patterns);
+	const { positiveMatchers, negativeMatchers } = compiledPatternSetFor(scope.patterns);
 
 	for (const { pattern, isMatch } of positiveMatchers) {
 		for (const pathBase of pathBases) {

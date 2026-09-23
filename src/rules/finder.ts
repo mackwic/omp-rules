@@ -2,6 +2,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, posix, relative, resolve } from "node:path";
 
+import { canonicalPath } from "./canonical-path.js";
 import {
 	GLOBAL_DISTANCE,
 	PROJECT_RULE_SUBDIRS,
@@ -219,30 +220,40 @@ function getWalkDirectories(projectRoot: string, targetFile: string | null): Wal
 	}
 
 	const startDirectory = dirname(resolve(targetFile));
-	if (!isSameOrChildPath(startDirectory, projectRoot)) {
+	const depth = projectDepth(startDirectory, projectRoot);
+	if (depth === null) {
 		return [{ directory: projectRoot, distance: 0 }];
 	}
 
 	const walkDirectories: WalkDirectory[] = [];
 	let currentDirectory = startDirectory;
-	let distance = 0;
-
-	while (true) {
+	for (let distance = 0; distance <= depth; distance += 1) {
 		walkDirectories.push({ directory: currentDirectory, distance });
-		if (currentDirectory === projectRoot) {
-			break;
-		}
-
-		const parentDirectory = dirname(currentDirectory);
-		if (parentDirectory === currentDirectory) {
-			break;
-		}
-
-		currentDirectory = parentDirectory;
-		distance += 1;
+		currentDirectory = dirname(currentDirectory);
 	}
 
 	return walkDirectories;
+}
+
+/**
+ * Depth of `directory` below `projectRoot`, or null when the directory is outside
+ * the project.
+ *
+ * The comparison runs in canonical space: the project root is already a realpath
+ * while a target may be spelled through a symlink (`/tmp` vs `/private/tmp` on
+ * macOS), and comparing raw spellings would look outside the project — scanning
+ * ancestor directories and never walking up to the real root. Walking itself stays
+ * in the caller's spelling so discovered paths keep the expected form.
+ */
+function projectDepth(directory: string, projectRoot: string): number | null {
+	const canonicalDirectory = canonicalPath(directory);
+	const canonicalRoot = canonicalPath(projectRoot);
+	if (!isSameOrChildPath(canonicalDirectory, canonicalRoot)) {
+		return null;
+	}
+
+	const relativeDirectory = relative(canonicalRoot, canonicalDirectory).replaceAll("\\", "/");
+	return relativeDirectory === "" ? 0 : relativeDirectory.split("/").length;
 }
 
 function isSameOrChildPath(childPath: string, parentPath: string): boolean {

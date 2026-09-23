@@ -85,6 +85,99 @@ describe("matchRule", () => {
 		expect(result).toEqual({ matched: true, reason: { kind: "glob", pattern: "src/**/*.ts" } });
 	});
 
+	it("#given frontmatter without any scope #when matching any path #then matches as default always-apply", () => {
+		// given
+		const frontmatter: RuleFrontmatter = { description: "Project context" };
+
+		// when
+		const result = matchRule({ frontmatter, isSingleFile: false, pathBases: defaultPathBases });
+
+		// then
+		expect(result).toEqual({ matched: true, reason: "always-apply-default" });
+	});
+
+	it("#given frontmatter without any scope #when no target file is known #then still matches (static load)", () => {
+		// given
+		const frontmatter: RuleFrontmatter = {};
+
+		// when
+		const result = matchRule({ frontmatter, isSingleFile: false, pathBases: null });
+
+		// then
+		expect(result).toEqual({ matched: true, reason: "always-apply-default" });
+	});
+
+	it("#given alwaysApply false without globs #when matching any path #then returns no match (explicit opt-out)", () => {
+		// given
+		const frontmatter: RuleFrontmatter = { alwaysApply: false };
+
+		// when
+		const result = matchRule({ frontmatter, isSingleFile: false, pathBases: defaultPathBases });
+
+		// then
+		expect(result).toEqual({ matched: false, reason: { kind: "no-match" } });
+	});
+
+	it("#given glob rule #when no target file is known #then returns no match (glob rules need a target)", () => {
+		// given
+		const frontmatter: RuleFrontmatter = { globs: "src/**/*.ts" };
+
+		// when
+		const result = matchRule({ frontmatter, isSingleFile: false, pathBases: null });
+
+		// then
+		expect(result).toEqual({ matched: false, reason: { kind: "no-match" } });
+	});
+
+	it("#given malformed frontmatter #when matching any path #then returns no match (unknown scope never loads)", () => {
+		// given
+		const frontmatter: RuleFrontmatter = {};
+
+		// when
+		const result = matchRule({
+			frontmatter,
+			isSingleFile: false,
+			frontmatterMalformed: true,
+			pathBases: defaultPathBases,
+		});
+
+		// then
+		expect(result).toEqual({ matched: false, reason: { kind: "no-match" } });
+	});
+
+	it("#given malformed frontmatter on a single-file rule #when matching #then still matches (single-file rules ignore frontmatter)", () => {
+		// given
+		const frontmatter: RuleFrontmatter = {};
+
+		// when
+		const result = matchRule({ frontmatter, isSingleFile: true, frontmatterMalformed: true, pathBases: null });
+
+		// then
+		expect(result).toEqual({ matched: true, reason: "single-file" });
+	});
+
+	it("#given alwaysApply true #when no target file is known #then matches with alwaysApply reason", () => {
+		// given
+		const frontmatter: RuleFrontmatter = { alwaysApply: true };
+
+		// when
+		const result = matchRule({ frontmatter, isSingleFile: false, pathBases: null });
+
+		// then
+		expect(result).toEqual({ matched: true, reason: "alwaysApply" });
+	});
+
+	it("#given single-file rule #when no target file is known #then matches with single-file reason", () => {
+		// given
+		const frontmatter: RuleFrontmatter = {};
+
+		// when
+		const result = matchRule({ frontmatter, isSingleFile: true, pathBases: null });
+
+		// then
+		expect(result).toEqual({ matched: true, reason: "single-file" });
+	});
+
 	it("#given single string glob #when matching TypeScript file #then matches with that pattern", () => {
 		// given
 		const frontmatter: RuleFrontmatter = { globs: "**/*.ts" };
@@ -162,7 +255,7 @@ describe("matchRule", () => {
 		expect(globs).toEqual(["**/*.ts", "src/**", "test/**"]);
 	});
 
-	it("#given empty globs array #when not single-file and not alwaysApply #then returns no match", () => {
+	it("#given empty globs array #when matching any path #then matches as default always-apply (the parser folds empty lists into no scope)", () => {
 		// given
 		const frontmatter: RuleFrontmatter = { globs: [] };
 
@@ -170,7 +263,7 @@ describe("matchRule", () => {
 		const result = matchRule({ frontmatter, isSingleFile: false, pathBases: defaultPathBases });
 
 		// then
-		expect(result).toEqual({ matched: false, reason: { kind: "no-match" } });
+		expect(result).toEqual({ matched: true, reason: "always-apply-default" });
 	});
 
 	it("#given basename-only pattern #when basename matches #then matches with basename pattern", () => {
